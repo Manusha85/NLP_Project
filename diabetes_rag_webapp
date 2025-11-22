@@ -1,0 +1,421 @@
+# Save this as diabetes_rag_webapp.py
+import streamlit as st
+import chromadb
+from sentence_transformers import SentenceTransformer
+import plotly.graph_objects as go
+import plotly.express as px
+import pandas as pd
+import time
+import re
+
+# Set page configuration
+st.set_page_config(
+    page_title="Diabetes Management Assistant",
+    page_icon="🩺",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Initialize components (cached for performance)
+@st.cache_resource
+def initialize_rag_system():
+    """Initialize the RAG system components"""
+    try:
+        # Load embedding model
+        model = SentenceTransformer('all-mpnet-base-v2')
+        
+        # Connect to vector database
+        chroma_client = chromadb.PersistentClient(path="./diabetes_prototype_db")
+        collection = chroma_client.get_collection("diabetes_docs")
+        
+        return model, collection
+    except Exception as e:
+        st.error(f"Error initializing system: {str(e)}")
+        return None, None
+
+def create_sample_database():
+    """Create a sample vector database if it doesn't exist"""
+    try:
+        sample_documents = [
+            "American Diabetes Association Standard: Most adults with diabetes should achieve HbA1c <7%.",
+            "ADA Recommendation: Premeal blood glucose 80-130 mg/dL, postprandial <180 mg/dL.",
+            "ADA Guideline: Metformin is the preferred initial pharmacologic agent for type 2 diabetes.",
+            "WHO Diabetes Guideline: Lifestyle interventions can prevent or delay type 2 diabetes.",
+            "WHO Recommendation: Screen for diabetes in high-risk populations.",
+            "PubMed Study: SGLT2 inhibitors reduce cardiovascular events in diabetes patients.",
+            "Clinical Trial: GLP-1 receptor agonists effective for weight management in type 2 diabetes.",
+            "Nutrition: Carbohydrate counting method helps manage postprandial glucose levels.",
+            "Diet: Mediterranean diet improves glycemic control in diabetes patients.",
+            "USDA Data: High-fiber foods help stabilize blood glucose levels.",
+            "Insulin Therapy: Basal insulin started at 10 units/day or 0.1-0.2 units/kg/day.",
+            "Complication: Annual eye exams recommended for all diabetes patients.",
+            "Monitoring: Self-monitoring of blood glucose essential for insulin-treated patients."
+        ]
+        
+        model = SentenceTransformer('all-mpnet-base-v2')
+        chroma_client = chromadb.PersistentClient(path="./diabetes_prototype_db")
+        collection = chroma_client.get_or_create_collection("diabetes_docs")
+        
+        embeddings = model.encode(sample_documents).tolist()
+        collection.add(
+            embeddings=embeddings,
+            documents=sample_documents,
+            ids=[f"doc_{i}" for i in range(len(sample_documents))]
+        )
+        
+        st.success(" Sample database created successfully!")
+        return model, collection
+        
+    except Exception as e:
+        st.error(f"Error creating database: {str(e)}")
+        return None, None
+
+def create_diabetes_diagrams():
+    """Create educational diabetes diagrams"""
+    
+    # Diagram 1: Blood Sugar Levels
+    fig_glucose = go.Figure()
+    
+    # Normal range
+    fig_glucose.add_trace(go.Scatter(
+        x=[0, 24], y=[70, 70],
+        fill='tonexty',
+        mode='lines',
+        line=dict(width=0),
+        fillcolor='rgba(0,255,0,0.2)',
+        name='Normal Range',
+        showlegend=True
+    ))
+    
+    fig_glucose.add_trace(go.Scatter(
+        x=[0, 24], y=[180, 180],
+        fill='tonexty',
+        mode='lines',
+        line=dict(width=0),
+        fillcolor='rgba(255,255,0,0.2)',
+        name='Target Range (Diabetic)',
+        showlegend=True
+    ))
+    
+    # Sample glucose curve
+    hours = list(range(24))
+    glucose_levels = [95, 92, 88, 85, 90, 110, 150, 165, 155, 140, 130, 125,
+                      115, 105, 100, 95, 100, 120, 135, 125, 115, 105, 98, 95]
+    
+    fig_glucose.add_trace(go.Scatter(
+        x=hours, y=glucose_levels,
+        mode='lines+markers',
+        name='Blood Glucose',
+        line=dict(color='red', width=3),
+        marker=dict(size=6)
+    ))
+    
+    fig_glucose.update_layout(
+        title=' Daily Blood Glucose Monitoring',
+        xaxis_title='Time of Day (Hours)',
+        yaxis_title='Blood Glucose (mg/dL)',
+        height=400,
+        showlegend=True
+    )
+    
+    # Diagram 2: Diabetes Statistics
+    diabetes_data = {
+        'Type': ['Type 2', 'Type 1', 'Prediabetes', 'Gestational'],
+        'Percentage': [90, 5, 38, 2],
+        'Color': ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A']
+    }
+    
+    fig_stats = px.pie(
+        diabetes_data,
+        values='Percentage',
+        names='Type',
+        title=' Diabetes Type Distribution',
+        color='Type',
+        color_discrete_map={
+            'Type 2': '#FF6B6B',
+            'Type 1': '#4ECDC4', 
+            'Prediabetes': '#45B7D1',
+            'Gestational': '#FFA07A'
+        }
+    )
+    
+    fig_stats.update_traces(textposition='inside', textinfo='percent+label')
+    
+    # Diagram 3: HbA1c Targets
+    hba1c_data = {
+        'Patient Group': ['Most Adults', 'Elderly/Long Duration', 'Children', 'Pregnant'],
+        'Target HbA1c': [6.5, 7.5, 7.0, 6.1],
+        'Color': ['green', 'orange', 'blue', 'purple']
+    }
+    
+    fig_hba1c = px.bar(
+        hba1c_data,
+        x='Patient Group',
+        y='Target HbA1c',
+        title=' HbA1c Target Ranges by Patient Group',
+        color='Patient Group',
+        color_discrete_sequence=['green', 'orange', 'blue', 'purple']
+    )
+    
+    fig_hba1c.update_layout(
+        yaxis_range=[5, 8],
+        height=400
+    )
+    
+    return fig_glucose, fig_stats, fig_hba1c
+
+def retrieve_documents(question, model, collection, top_k=3):
+    """Retrieve relevant documents for the question"""
+    try:
+        question_embedding = model.encode([question]).tolist()[0]
+        results = collection.query(
+            query_embeddings=[question_embedding],
+            n_results=top_k
+        )
+        return results
+    except Exception as e:
+        st.error(f"Error retrieving documents: {str(e)}")
+        return None
+
+def generate_answer(question, retrieved_docs, user_type="patient"):
+    """Generate answer based on retrieved documents"""
+    
+    if not retrieved_docs or not retrieved_docs['documents'][0]:
+        return "I couldn't find specific clinical guidelines for your question. Please try rephrasing or ask about general diabetes management topics."
+    
+    context = "\n".join([f"- {doc}" for doc in retrieved_docs['documents'][0]])
+    
+    # Simulate different response styles based on user type
+    if user_type == "clinician":
+        response_template = f"""
+**Clinical Summary:**
+
+Based on {len(retrieved_docs['documents'][0])} evidence sources:
+
+**Key Points:**
+- {retrieved_docs['documents'][0][0].split(':')[1].strip() if ':' in retrieved_docs['documents'][0][0] else retrieved_docs['documents'][0][0]}
+- {retrieved_docs['documents'][0][1].split(':')[1].strip() if len(retrieved_docs['documents'][0]) > 1 and ':' in retrieved_docs['documents'][0][1] else retrieved_docs['documents'][0][1] if len(retrieved_docs['documents'][0]) > 1 else 'Consult full guidelines'}
+
+**Evidence Level:** Clinical Guidelines
+**Recommendation Grade:** Strong
+"""
+    else:
+        response_template = f"""
+**Here's what clinical guidelines say:**
+
+ **Main Recommendation:**
+{retrieved_docs['documents'][0][0]}
+
+ **Key Information:**
+{retrieved_docs['documents'][0][1] if len(retrieved_docs['documents'][0]) > 1 else 'Always work with your healthcare team for personalized advice.'}
+
+ **Remember:** This is general information. Your doctor will help create the best plan for you.
+
+*Based on {len(retrieved_docs['documents'][0])} clinical sources*
+"""
+    
+    return response_template.strip()
+
+def main():
+    # Initialize session state
+    if 'conversation_history' not in st.session_state:
+        st.session_state.conversation_history = []
+    
+    # Header
+    st.title("🩺 Diabetes Management Assistant")
+    st.markdown("### Evidence-Based Q&A System using Clinical Guidelines")
+    
+    # Initialize RAG system
+    model, collection = initialize_rag_system()
+    
+    if model is None or collection is None:
+        st.warning(" System not initialized. Creating sample database...")
+        model, collection = create_sample_database()
+    
+    if model is None or collection is None:
+        st.error(" Failed to initialize the system. Please check the requirements.")
+        return
+    
+    # Create tabs
+    tab1, tab2, tab3 = st.tabs([" Diabetes Overview", "💬 Ask Questions", " Clinical Resources"])
+    
+    with tab1:
+        st.header("Understanding Diabetes")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader(" What is Diabetes?")
+            st.markdown("""
+            Diabetes is a chronic condition that affects how your body processes blood sugar (glucose).
+            
+            **Main Types:**
+            - **Type 1 Diabetes**: Autoimmune condition, usually diagnosed in children/young adults
+            - **Type 2 Diabetes**: Insulin resistance, most common type
+            - **Prediabetes**: Elevated blood sugar, high risk for developing Type 2
+            - **Gestational Diabetes**: Occurs during pregnancy
+            
+            **Key Metrics to Monitor:**
+            - **HbA1c**: 3-month average blood sugar
+            - **Fasting Glucose**: Morning blood sugar before eating
+            - **Postprandial**: Blood sugar after meals
+            """)
+        
+        with col2:
+            st.subheader(" Treatment Goals")
+            st.markdown("""
+            **Blood Glucose Targets:**
+            - **Fasting**: 80-130 mg/dL
+            - **After meals**: <180 mg/dL
+            - **HbA1c**: <7% for most adults
+            
+            **Management Pillars:**
+            1.  **Nutrition**: Balanced diet, carbohydrate counting
+            2.  **Exercise**: 150 mins/week moderate activity
+            3.  **Medication**: As prescribed by your doctor
+            4.  **Monitoring**: Regular blood sugar checks
+            5.  **Education**: Understanding your condition
+            """)
+        
+        # Display diagrams
+        st.subheader(" Diabetes Management Diagrams")
+        
+        fig_glucose, fig_stats, fig_hba1c = create_diabetes_diagrams()
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.plotly_chart(fig_glucose, use_container_width=True)
+            st.plotly_chart(fig_hba1c, use_container_width=True)
+        
+        with col2:
+            st.plotly_chart(fig_stats, use_container_width=True)
+    
+    with tab2:
+        st.header("Ask Diabetes Questions")
+        
+        # User type selection
+        user_type = st.radio(
+            "I am a:",
+            ["Patient", "Healthcare Professional"],
+            horizontal=True
+        )
+        
+        # Question input
+        question = st.text_area(
+            " Ask your diabetes question:",
+            placeholder="e.g., What foods should I eat with diabetes? How often should I check my blood sugar? What are the symptoms of low blood sugar?",
+            height=100
+        )
+        
+        # Pre-defined quick questions
+        st.subheader(" Quick Questions")
+        quick_questions = [
+            "What is the target HbA1c for diabetes?",
+            "Which medication is first-line for type 2 diabetes?",
+            "How can diet help manage blood glucose?",
+            "What are normal blood sugar levels?",
+            "When should I check my blood sugar?"
+        ]
+        
+        cols = st.columns(3)
+        for i, q in enumerate(quick_questions):
+            with cols[i % 3]:
+                if st.button(f" {q}", use_container_width=True):
+                    question = q
+        
+        if st.button(" Get Answer", type="primary") or question:
+            if question:
+                with st.spinner(" Searching clinical guidelines..."):
+                    # Retrieve documents
+                    retrieved_docs = retrieve_documents(question, model, collection)
+                    
+                    if retrieved_docs:
+                        # Generate answer
+                        answer = generate_answer(question, retrieved_docs, user_type.lower())
+                        
+                        # Store in conversation history
+                        st.session_state.conversation_history.append({
+                            'question': question,
+                            'answer': answer,
+                            'sources': retrieved_docs['documents'][0] if retrieved_docs else [],
+                            'timestamp': time.time()
+                        })
+                    
+                        # Display answer
+                        st.success(" Answer Generated")
+                        st.markdown("---")
+                        st.markdown(answer)
+                        
+                        # Display sources
+                        with st.expander(" View Clinical Sources Used"):
+                            for i, source in enumerate(retrieved_docs['documents'][0], 1):
+                                st.markdown(f"**Source {i}:** {source}")
+                    else:
+                        st.error(" Failed to retrieve information. Please try again.")
+                
+                # Conversation history
+                if len(st.session_state.conversation_history) > 1:
+                    st.markdown("---")
+                    st.subheader(" Conversation History")
+                    for i, conv in enumerate(reversed(st.session_state.conversation_history[-5:]), 1):
+                        with st.expander(f"Q: {conv['question']}"):
+                            st.markdown(f"**A:** {conv['answer']}")
+            else:
+                st.warning(" Please enter a question or select a quick question.")
+    
+    with tab3:
+        st.header(" Clinical Resources & References")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader(" Guidelines")
+            st.markdown("""
+            - **American Diabetes Association (ADA) Standards of Care**
+            - **World Health Organization (WHO) Diabetes Guidelines**
+            - **National Institute for Health and Care Excellence (NICE)**
+            - **International Diabetes Federation (IDF)**
+            """)
+            
+            st.subheader(" Research Databases")
+            st.markdown("""
+            - **PubMed Clinical Trials**
+            - **Cochrane Diabetes Reviews**
+            - **ClinicalKey Medical Database**
+            - **UpToDate Diabetes Content**
+            """)
+        
+        with col2:
+            st.subheader(" Patient Resources")
+            st.markdown("""
+            - **Diabetes Self-Management Education**
+            - **Nutritional Planning Tools**
+            - **Blood Glucose Log Templates**
+            - **Medication Adherence Apps**
+            - **Exercise Planning Guides**
+            """)
+            
+            st.subheader(" Emergency Information")
+            st.markdown("""
+            **Hypoglycemia (Low Blood Sugar) Symptoms:**
+            - Shakiness, dizziness, sweating
+            - Hunger, irritability, confusion
+            - **Treatment**: 15g fast-acting carbs + recheck in 15min
+            
+            **Hyperglycemia (High Blood Sugar) Symptoms:**
+            - Frequent urination, increased thirst
+            - Blurred vision, fatigue
+            - **Action**: Contact healthcare provider
+            """)
+        
+        # Emergency contact section
+        st.markdown("---")
+        st.error("""
+         **Medical Emergency Notice**: 
+        This system provides educational information only. For medical emergencies, 
+        immediately contact your healthcare provider or call emergency services.
+        """)
+
+if __name__ == "__main__":
+    main()
